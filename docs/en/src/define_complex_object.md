@@ -1,6 +1,7 @@
 # Object
 
 Different from `SimpleObject`, `Object` must have a resolver defined for each field in its `impl`.
+If you want to automatically resolve simple fields **and** have user-defined resolvers, see [SimpleObject](define_simple_object.html).
 
 **A resolver function has to be asynchronous. The first argument has to be `&self`, the second is an optional `Context` and it is followed by field arguments.**
 
