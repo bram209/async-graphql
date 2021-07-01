@@ -113,13 +113,18 @@ impl Extension for TracingExtension {
         next.run(ctx).instrument(span).await
     }
 
-    async fn execute(&self, ctx: &ExtensionContext<'_>, next: NextExecute<'_>) -> Response {
+    async fn execute(
+        &self,
+        ctx: &ExtensionContext<'_>,
+        operation_name: Option<&str>,
+        next: NextExecute<'_>,
+    ) -> Response {
         let span = span!(
             target: "async_graphql::graphql",
             Level::INFO,
             "execute"
         );
-        next.run(ctx).instrument(span).await
+        next.run(ctx, operation_name).instrument(span).await
     }
 
     async fn resolve(
@@ -137,11 +142,11 @@ impl Extension for TracingExtension {
             return_type = %info.return_type,
         );
         next.run(ctx, info)
-            .instrument(span)
             .map_err(|err| {
                 tracinglib::error!(target: "async_graphql::graphql", error = %err.message);
                 err
             })
+            .instrument(span)
             .await
     }
 }

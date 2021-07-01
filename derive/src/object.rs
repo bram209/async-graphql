@@ -2,13 +2,13 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::ext::IdentExt;
-use syn::{Block, Error, FnArg, Ident, ImplItem, ItemImpl, Pat, ReturnType, Type, TypeReference};
+use syn::{Block, Error, Ident, ImplItem, ItemImpl, ReturnType};
 
 use crate::args::{self, ComplexityType, RenameRuleExt, RenameTarget};
 use crate::output_type::OutputType;
 use crate::utils::{
-    gen_deprecation, generate_default, generate_guards, generate_validator, get_cfg_attrs,
-    get_crate_name, get_param_getter_ident, get_rustdoc, get_type_path_and_name,
+    extract_input_args, gen_deprecation, generate_default, generate_guards, generate_validator,
+    get_cfg_attrs, get_crate_name, get_param_getter_ident, get_rustdoc, get_type_path_and_name,
     parse_complexity_expr, parse_graphql_attrs, remove_graphql_attrs, visible_fn, GeneratorResult,
 };
 
@@ -54,6 +54,8 @@ pub fn generate(
                     return Err(Error::new_spanned(&method, "Must be asynchronous").into());
                 }
 
+                let args = extract_input_args(&crate_name, method)?;
+
                 let ty = match &method.sig.output {
                     ReturnType::Type(_, ty) => OutputType::parse(ty)?,
                     ReturnType::Default => {
@@ -64,72 +66,6 @@ pub fn generate(
                         .into())
                     }
                 };
-                let mut create_ctx = true;
-                let mut args = Vec::new();
-
-                if method.sig.inputs.is_empty() {
-                    return Err(Error::new_spanned(
-                        &method.sig,
-                        "The self receiver must be the first parameter.",
-                    )
-                    .into());
-                }
-
-                for (idx, arg) in method.sig.inputs.iter_mut().enumerate() {
-                    if let FnArg::Receiver(receiver) = arg {
-                        if idx != 0 {
-                            return Err(Error::new_spanned(
-                                receiver,
-                                "The self receiver must be the first parameter.",
-                            )
-                            .into());
-                        }
-                    } else if let FnArg::Typed(pat) = arg {
-                        if idx == 0 {
-                            return Err(Error::new_spanned(
-                                pat,
-                                "The self receiver must be the first parameter.",
-                            )
-                            .into());
-                        }
-
-                        match (&*pat.pat, &*pat.ty) {
-                            (Pat::Ident(arg_ident), Type::Path(arg_ty)) => {
-                                args.push((
-                                    arg_ident.clone(),
-                                    arg_ty.clone(),
-                                    parse_graphql_attrs::<args::Argument>(&pat.attrs)?
-                                        .unwrap_or_default(),
-                                ));
-                                remove_graphql_attrs(&mut pat.attrs);
-                            }
-                            (arg, Type::Reference(TypeReference { elem, .. })) => {
-                                if let Type::Path(path) = elem.as_ref() {
-                                    if idx != 1
-                                        || path.path.segments.last().unwrap().ident != "Context"
-                                    {
-                                        return Err(Error::new_spanned(
-                                            arg,
-                                            "Only types that implement `InputType` can be used as input arguments.",
-                                        )
-                                        .into());
-                                    } else {
-                                        create_ctx = false;
-                                    }
-                                }
-                            }
-                            _ => {
-                                return Err(Error::new_spanned(arg, "Invalid argument type.").into())
-                            }
-                        }
-                    }
-                }
-
-                if create_ctx {
-                    let arg =
-                        syn::parse2::<FnArg>(quote! { _: &#crate_name::Context<'_> }).unwrap();
-                    method.sig.inputs.insert(1, arg);
-                }
 
                 let entity_type = ty.value_type();
                 let mut key_pat = Vec::new();
@@ -173,15 +109,14 @@ pub fn generate(
                                 value
                             })
                         });
-                        use_keys.push(ident);
                     } else {
                         // requires
                         requires_getter.push(quote! {
                             let #ident: #ty = #crate_name::InputType::parse(params.get(#name).cloned()).
-                                map_err(|err| err.into_server_error().at(ctx.item.pos))?;
+                                map_err(|err| err.into_server_error(ctx.item.pos))?;
                         });
-                        use_keys.push(ident);
                     }
+                    use_keys.push(ident);
                 }
 
                 add_keys.push(quote! {
@@ -209,7 +144,11 @@ pub fn generate(
                         syn::parse2::<ReturnType>(quote! { -> #crate_name::Result<#inner_ty> })
                             .expect("invalid result type");
                 }
-                let do_find = quote! { self.#field_ident(ctx, #(#use_keys),*).await.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error().at(ctx.item.pos))? };
+                let do_find = quote! {
+                    self.#field_ident(ctx, #(#use_keys),*)
+                        .await.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err)
+                        .into_server_error(ctx.item.pos))
+                };
 
                 find_entities.push((
                     args.len(),
@@ -217,9 +156,13 @@ pub fn generate(
                         #(#cfg_attrs)*
                         if typename == &<#entity_type as #crate_name::Type>::type_name() {
                             if let (#(#key_pat),*) = (#(#key_getter),*) {
-                                #(#requires_getter)*
+                                let f = async move {
+                                    #(#requires_getter)*
+                                    #do_find
+                                };
+                                let obj = f.await.map_err(|err| ctx.set_error_path(err))?;
                                 let ctx_obj = ctx.with_selection_set(&ctx.item.node.selection_set);
-                                return #crate_name::OutputType::resolve(&#do_find, &ctx_obj, ctx.item).await.map(::std::option::Option::Some);
+                                return #crate_name::OutputType::resolve(&obj, &ctx_obj, ctx.item).await.map(::std::option::Option::Some);
                             }
                         }
                     },
@@ -247,16 +190,6 @@ pub fn generate(
                     Some(provides) => quote! { ::std::option::Option::Some(#provides) },
                     None => quote! { ::std::option::Option::None },
                 };
-                let ty = match &method.sig.output {
-                    ReturnType::Type(_, ty) => OutputType::parse(ty)?,
-                    ReturnType::Default => {
-                        return Err(Error::new_spanned(
-                            &method.sig.output,
-                            "Resolver must have a return type",
-                        )
-                        .into())
-                    }
-                };
                 let cache_control = {
                     let public = method_args.cache_control.is_public();
                     let max_age = method_args.cache_control.max_age;
@@ -269,76 +202,20 @@ pub fn generate(
                 };
                 let cfg_attrs = get_cfg_attrs(&method.attrs);
 
-                let mut create_ctx = true;
-                let mut args = Vec::new();
-
-                if method.sig.inputs.is_empty() {
-                    return Err(Error::new_spanned(
-                        &method.sig,
-                        "The self receiver must be the first parameter.",
-                    )
-                    .into());
-                }
-
-                for (idx, arg) in method.sig.inputs.iter_mut().enumerate() {
-                    if let FnArg::Receiver(receiver) = arg {
-                        if idx != 0 {
-                            return Err(Error::new_spanned(
-                                receiver,
-                                "The self receiver must be the first parameter.",
-                            )
-                            .into());
-                        }
-                    } else if let FnArg::Typed(pat) = arg {
-                        if idx == 0 {
-                            return Err(Error::new_spanned(
-                                pat,
-                                "The self receiver must be the first parameter.",
-                            )
-                            .into());
-                        }
-
-                        match (&*pat.pat, &*pat.ty) {
-                            (Pat::Ident(arg_ident), Type::Path(arg_ty)) => {
-                                args.push((
-                                    arg_ident.clone(),
-                                    arg_ty.clone(),
-                                    parse_graphql_attrs::<args::Argument>(&pat.attrs)?
-                                        .unwrap_or_default(),
-                                ));
-                                remove_graphql_attrs(&mut pat.attrs);
-                            }
-                            (arg, Type::Reference(TypeReference { elem, .. })) => {
-                                if let Type::Path(path) = elem.as_ref() {
-                                    if idx != 1
-                                        || path.path.segments.last().unwrap().ident != "Context"
-                                    {
-                                        return Err(Error::new_spanned(
-                                            arg,
-                                            "Only types that implement `InputType` can be used as input arguments.",
-                                        )
-                                        .into());
-                                    }
-
-                                    create_ctx = false;
-                                }
-                            }
-                            _ => {
-                                return Err(Error::new_spanned(arg, "Invalid argument type.").into())
-                            }
-                        }
-                    }
-                }
-
-                if create_ctx {
-                    let arg =
-                        syn::parse2::<FnArg>(quote! { _: &#crate_name::Context<'_> }).unwrap();
-                    method.sig.inputs.insert(1, arg);
-                }
-
+                let args = extract_input_args(&crate_name, method)?;
                 let mut schema_args = Vec::new();
                 let mut use_params = Vec::new();
                 let mut get_params = Vec::new();
+                let ty = match &method.sig.output {
+                    ReturnType::Type(_, ty) => OutputType::parse(ty)?,
+                    ReturnType::Default => {
+                        return Err(Error::new_spanned(
+                            &method.sig.output,
+                            "Resolver must have a return type",
+                        )
+                        .into())
+                    }
+                };
 
                 for (
                     ident,
@@ -513,7 +390,7 @@ pub fn generate(
                 let resolve_obj = quote! {
                     {
                         let res = self.#field_ident(ctx, #(#use_params),*).await;
-                        res.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error().at(ctx.item.pos))?
+                        res.map_err(|err| ::std::convert::Into::<#crate_name::Error>::into(err).into_server_error(ctx.item.pos))
                     }
                 };
 
@@ -524,19 +401,21 @@ pub fn generate(
 
                 let guard = guard.map(|guard| {
                     quote! {
-                        #guard.check(ctx).await
-                            .map_err(|err| err.into_server_error().at(ctx.item.pos))?;
+                        #guard.check(ctx).await.map_err(|err| err.into_server_error(ctx.item.pos))?;
                     }
                 });
 
                 resolvers.push(quote! {
                     #(#cfg_attrs)*
                     if ctx.item.node.name.node == #field_name {
-                        #(#get_params)*
-                        #guard
+                        let f = async move {
+                            #(#get_params)*
+                            #guard
+                            #resolve_obj
+                        };
+                        let obj = f.await.map_err(|err| ctx.set_error_path(err))?;
                         let ctx_obj = ctx.with_selection_set(&ctx.item.node.selection_set);
-                        let res = #resolve_obj;
-                        return #crate_name::OutputType::resolve(&res, &ctx_obj, ctx.item).await.map(::std::option::Option::Some);
+                        return #crate_name::OutputType::resolve(&obj, &ctx_obj, ctx.item).await.map(::std::option::Option::Some);
                     }
                 });
             }
@@ -568,6 +447,11 @@ pub fn generate(
     }
 
     let visible = visible_fn(&object_args.visible);
+    let resolve_container = if object_args.serial {
+        quote! { #crate_name::resolver_utils::resolve_container_serial(ctx, self).await }
+    } else {
+        quote! { #crate_name::resolver_utils::resolve_container(ctx, self).await }
+    };
 
     let expanded = quote! {
         #item_impl
@@ -619,8 +503,7 @@ pub fn generate(
                     typename
                 } else {
                     return ::std::result::Result::Err(
-                        #crate_name::ServerError::new(r#""__typename" must be an existing string."#)
-                            .at(ctx.item.pos)
+                        #crate_name::ServerError::new(r#""__typename" must be an existing string."#, ::std::option::Option::Some(ctx.item.pos))
                     );
                 };
                 #(#find_entities_iter)*
@@ -631,8 +514,12 @@ pub fn generate(
         #[allow(clippy::all, clippy::pedantic)]
         #[#crate_name::async_trait::async_trait]
         impl #generics #crate_name::OutputType for #shadow_type<#generics_params> #where_clause {
-            async fn resolve(&self, ctx: &#crate_name::ContextSelectionSet<'_>, _field: &#crate_name::Positioned<#crate_name::parser::types::Field>) -> #crate_name::ServerResult<#crate_name::Value> {
-                #crate_name::resolver_utils::resolve_container(ctx, self).await
+            async fn resolve(
+                &self,
+                ctx: &#crate_name::ContextSelectionSet<'_>,
+                _field: &#crate_name::Positioned<#crate_name::parser::types::Field>
+            ) -> #crate_name::ServerResult<#crate_name::Value> {
+                #resolve_container
             }
         }
 

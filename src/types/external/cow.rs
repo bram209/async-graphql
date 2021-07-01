@@ -1,7 +1,8 @@
 use std::borrow::Cow;
 
-use crate::{registry, ContextSelectionSet, OutputType, Positioned, ServerResult, Type, Value};
 use async_graphql_parser::types::Field;
+
+use crate::{registry, ContextSelectionSet, OutputType, Positioned, ServerResult, Type, Value};
 
 impl<'a, T> Type for Cow<'a, T>
 where

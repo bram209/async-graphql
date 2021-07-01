@@ -65,9 +65,12 @@ impl OutputType for EmptyMutation {
     async fn resolve(
         &self,
         _ctx: &ContextSelectionSet<'_>,
-        field: &Positioned<Field>,
+        _field: &Positioned<Field>,
     ) -> ServerResult<Value> {
-        Err(ServerError::new("Schema is not configured for mutations.").at(field.pos))
+        Err(ServerError::new(
+            "Schema is not configured for mutations.",
+            None,
+        ))
     }
 }
 

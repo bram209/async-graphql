@@ -127,10 +127,9 @@ impl<T: ObjectType> ContainerType for QueryRoot<T> {
                 let representations: Vec<Any> = ctx.param_value("representations", None)?;
                 let res = futures_util::future::try_join_all(representations.iter().map(
                     |item| async move {
-                        self.inner
-                            .find_entity(ctx, &item.0)
-                            .await?
-                            .ok_or_else(|| ServerError::new("Entity not found.").at(ctx.item.pos))
+                        self.inner.find_entity(ctx, &item.0).await?.ok_or_else(|| {
+                            ServerError::new("Entity not found.", Some(ctx.item.pos))
+                        })
                     },
                 ))
                 .await?;

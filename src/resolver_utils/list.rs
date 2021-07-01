@@ -1,6 +1,6 @@
 use crate::extensions::ResolveInfo;
 use crate::parser::types::Field;
-use crate::{ContextSelectionSet, OutputType, PathSegment, Positioned, ServerResult, Type, Value};
+use crate::{ContextSelectionSet, OutputType, Positioned, ServerResult, Type, Value};
 
 /// Resolve an list by executing each of the items concurrently.
 pub async fn resolve_list<'a, T: OutputType + 'a>(
@@ -23,12 +23,14 @@ pub async fn resolve_list<'a, T: OutputType + 'a>(
                         path_node: ctx_idx.path_node.as_ref().unwrap(),
                         parent_type: &Vec::<T>::type_name(),
                         return_type: &T::qualified_type_name(),
+                        name: field.node.name.node.as_str(),
+                        alias: field.node.alias.as_ref().map(|alias| alias.node.as_str()),
                     };
                     let resolve_fut = async {
                         OutputType::resolve(&item, &ctx_idx, field)
                             .await
                             .map(Option::Some)
-                            .map_err(|e| e.path(PathSegment::Index(idx)))
+                            .map_err(|err| ctx_idx.set_error_path(err))
                     };
                     futures_util::pin_mut!(resolve_fut);
                     extensions
@@ -48,7 +50,7 @@ pub async fn resolve_list<'a, T: OutputType + 'a>(
             futures.push(async move {
                 OutputType::resolve(&item, &ctx_idx, field)
                     .await
-                    .map_err(|e| e.path(PathSegment::Index(idx)))
+                    .map_err(|err| ctx_idx.set_error_path(err))
             });
         }
         Ok(Value::List(

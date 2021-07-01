@@ -39,11 +39,11 @@ impl MultipartOptions {
 }
 
 pub(super) async fn receive_batch_multipart(
-    body: impl AsyncRead + Send + 'static,
+    body: impl AsyncRead + Send,
     boundary: impl Into<String>,
     opts: MultipartOptions,
 ) -> Result<BatchRequest, ParseRequestError> {
-    let mut multipart = Multipart::new_with_constraints(
+    let mut multipart = Multipart::with_constraints(
         ReaderStream::new(body),
         boundary,
         Constraints::new().size_limit({

@@ -108,8 +108,10 @@ impl<T: OutputType + Sync, E: Into<Error> + Send + Sync + Clone> OutputType for 
         field: &Positioned<Field>,
     ) -> ServerResult<Value> {
         match self {
-            Ok(value) => Ok(value.resolve(ctx, field).await?),
-            Err(err) => Err(err.clone().into().into_server_error().at(field.pos)),
+            Ok(value) => value.resolve(ctx, field).await,
+            Err(err) => {
+                return Err(ctx.set_error_path(err.clone().into().into_server_error(field.pos)))
+            }
         }
     }
 }

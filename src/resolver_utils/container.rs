@@ -5,9 +5,7 @@ use std::pin::Pin;
 use crate::extensions::ResolveInfo;
 use crate::parser::types::Selection;
 use crate::registry::MetaType;
-use crate::{
-    Context, ContextSelectionSet, Name, OutputType, PathSegment, ServerError, ServerResult, Value,
-};
+use crate::{Context, ContextSelectionSet, Name, OutputType, ServerError, ServerResult, Value};
 
 /// Represents a GraphQL container object.
 ///
@@ -176,12 +174,10 @@ impl<'a> Fields<'a> {
                             let extensions = &ctx.query_env.extensions;
 
                             if extensions.is_empty() {
-                                match root.resolve_field(&ctx_field).await {
-                                    Ok(value) => Ok((field_name, value.unwrap_or_default())),
-                                    Err(e) => {
-                                        Err(e.path(PathSegment::Field(field_name.to_string())))
-                                    }
-                                }
+                                Ok((
+                                    field_name,
+                                    root.resolve_field(&ctx_field).await?.unwrap_or_default(),
+                                ))
                             } else {
                                 let type_name = T::type_name();
                                 let resolve_info = ResolveInfo {
@@ -199,25 +195,32 @@ impl<'a> Fields<'a> {
                                     {
                                         Some(ty) => &ty,
                                         None => {
-                                            return Err(ServerError::new(format!(
-                                                r#"Cannot query field "{}" on type "{}"."#,
-                                                field_name, type_name
-                                            ))
-                                            .at(ctx_field.item.pos)
-                                            .path(PathSegment::Field(field_name.to_string())));
+                                            return Err(ServerError::new(
+                                                format!(
+                                                    r#"Cannot query field "{}" on type "{}"."#,
+                                                    field_name, type_name
+                                                ),
+                                                Some(ctx_field.item.pos),
+                                            ));
                                         }
                                     },
+                                    name: field.node.name.node.as_str(),
+                                    alias: field
+                                        .node
+                                        .alias
+                                        .as_ref()
+                                        .map(|alias| alias.node.as_str()),
                                 };
 
-                                let resolve_fut = async { root.resolve_field(&ctx_field).await };
+                                let resolve_fut = root.resolve_field(&ctx_field);
                                 futures_util::pin_mut!(resolve_fut);
-                                let res = extensions.resolve(resolve_info, &mut resolve_fut).await;
-                                match res {
-                                    Ok(value) => Ok((field_name, value.unwrap_or_default())),
-                                    Err(e) => {
-                                        Err(e.path(PathSegment::Field(field_name.to_string())))
-                                    }
-                                }
+                                Ok((
+                                    field_name,
+                                    extensions
+                                        .resolve(resolve_info, &mut resolve_fut)
+                                        .await?
+                                        .unwrap_or_default(),
+                                ))
                             }
                         }
                     }));
@@ -231,11 +234,13 @@ impl<'a> Fields<'a> {
                             let fragment = match fragment {
                                 Some(fragment) => fragment,
                                 None => {
-                                    return Err(ServerError::new(format!(
-                                        r#"Unknown fragment "{}"."#,
-                                        spread.node.fragment_name.node
-                                    ))
-                                    .at(spread.pos));
+                                    return Err(ServerError::new(
+                                        format!(
+                                            r#"Unknown fragment "{}"."#,
+                                            spread.node.fragment_name.node
+                                        ),
+                                        Some(spread.pos),
+                                    ));
                                 }
                             };
                             (

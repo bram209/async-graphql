@@ -47,7 +47,13 @@ impl<T: OutputType + Sync> OutputType for Option<T> {
         field: &Positioned<Field>,
     ) -> ServerResult<Value> {
         if let Some(inner) = self {
-            OutputType::resolve(inner, ctx, field).await
+            match OutputType::resolve(inner, ctx, field).await {
+                Ok(value) => Ok(value),
+                Err(err) => {
+                    ctx.add_error(err);
+                    Ok(Value::Null)
+                }
+            }
         } else {
             Ok(Value::Null)
         }

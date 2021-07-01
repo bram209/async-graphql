@@ -18,8 +18,8 @@ use crate::parser::types::{
 };
 use crate::schema::SchemaEnv;
 use crate::{
-    Error, InputType, Lookahead, Name, Pos, Positioned, Result, ServerError, ServerResult,
-    UploadValue, Value,
+    Error, InputType, Lookahead, Name, PathSegment, Pos, Positioned, Result, ServerError,
+    ServerResult, UploadValue, Value,
 };
 
 /// Schema/Context data.
@@ -121,7 +121,7 @@ impl<'a> QueryPathNode<'a> {
 
     /// Get the path represented by `Vec<String>`; numbers will be stringified.
     #[must_use]
-    pub fn to_string_vec(&self) -> Vec<String> {
+    pub fn to_string_vec(self) -> Vec<String> {
         let mut res = Vec::new();
         self.for_each(|s| {
             res.push(match s {
@@ -207,6 +207,7 @@ pub struct ContextBase<'a, T> {
 pub struct QueryEnvInner {
     pub extensions: Extensions,
     pub variables: Variables,
+    pub operation_name: Option<String>,
     pub operation: Positioned<OperationDefinition>,
     pub fragments: HashMap<Name, Positioned<FragmentDefinition>>,
     pub uploads: Vec<UploadValue>,
@@ -214,6 +215,7 @@ pub struct QueryEnvInner {
     pub ctx_data: Arc<Data>,
     pub http_headers: Mutex<HeaderMap<String>>,
     pub disable_introspection: bool,
+    pub errors: Mutex<Vec<ServerError>>,
 }
 
 #[doc(hidden)]
@@ -278,6 +280,29 @@ impl<'a, T> ContextBase<'a, T> {
             schema_env: self.schema_env,
             query_env: self.query_env,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn set_error_path(&self, error: ServerError) -> ServerError {
+        if let Some(node) = self.path_node {
+            let mut path = Vec::new();
+            node.for_each(|current_node| {
+                path.push(match current_node {
+                    QueryPathSegment::Name(name) => PathSegment::Field((*name).to_string()),
+                    QueryPathSegment::Index(idx) => PathSegment::Index(*idx),
+                })
+            });
+            ServerError { path, ..error }
+        } else {
+            error
+        }
+    }
+
+    /// Report a resolver error.
+    ///
+    /// When implementing `OutputType`, if an error occurs, call this function to report this error and return `Value::Null`.
+    pub fn add_error(&self, error: ServerError) {
+        self.query_env.errors.lock().unwrap().push(error);
     }
 
     /// Gets the global data defined in the `Context` or `Schema`.
@@ -457,7 +482,9 @@ impl<'a, T> ContextBase<'a, T> {
                     .or_else(|| def.node.default_value())
             })
             .cloned()
-            .ok_or_else(|| ServerError::new(format!("Variable {} is not defined.", name)).at(pos))
+            .ok_or_else(|| {
+                ServerError::new(format!("Variable {} is not defined.", name), Some(pos))
+            })
     }
 
     fn resolve_input_value(&self, value: Positioned<InputValue>) -> ServerResult<Value> {
@@ -486,7 +513,7 @@ impl<'a, T> ContextBase<'a, T> {
             let condition_input = directive
                 .node
                 .get_argument("if")
-                .ok_or_else(|| ServerError::new(format!(r#"Directive @{} requires argument `if` of type `Boolean!` but it was not provided."#, if include { "include" } else { "skip" })).at(directive.pos))?
+                .ok_or_else(|| ServerError::new(format!(r#"Directive @{} requires argument `if` of type `Boolean!` but it was not provided."#, if include { "include" } else { "skip" }),Some(directive.pos)))?
                 .clone();
 
             let pos = condition_input.pos;
@@ -494,7 +521,7 @@ impl<'a, T> ContextBase<'a, T> {
 
             if include
                 != <bool as InputType>::parse(Some(condition_input))
-                    .map_err(|e| e.into_server_error().at(pos))?
+                    .map_err(|e| e.into_server_error(pos))?
             {
                 return Ok(true);
             }
@@ -536,7 +563,7 @@ impl<'a> ContextBase<'a, &'a Positioned<Field>> {
             Some(value) => (value.pos, Some(self.resolve_input_value(value)?)),
             None => (Pos::default(), None),
         };
-        InputType::parse(value).map_err(|e| e.into_server_error().at(pos))
+        InputType::parse(value).map_err(|e| e.into_server_error(pos))
     }
 
     /// Creates a uniform interface to inspect the forthcoming selections.
@@ -624,8 +651,8 @@ impl<'a> ContextBase<'a, &'a Positioned<Field>> {
 /// Selection field.
 #[derive(Clone, Copy)]
 pub struct SelectionField<'a> {
-    fragments: &'a HashMap<Name, Positioned<FragmentDefinition>>,
-    field: &'a Field,
+    pub(crate) fragments: &'a HashMap<Name, Positioned<FragmentDefinition>>,
+    pub(crate) field: &'a Field,
     context: &'a Context<'a>,
 }
 

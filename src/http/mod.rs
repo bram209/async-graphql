@@ -12,12 +12,12 @@ use crate::{BatchRequest, ParseRequestError, Request};
 pub use graphiql_source::graphiql_source;
 pub use multipart::MultipartOptions;
 pub use playground_source::{playground_source, GraphQLPlaygroundConfig};
-pub use websocket::{Protocols as WebSocketProtocols, WebSocket, WsMessage};
+pub use websocket::{ClientMessage, Protocols as WebSocketProtocols, WebSocket, WsMessage};
 
 /// Receive a GraphQL request from a content type and body.
 pub async fn receive_body(
     content_type: Option<impl AsRef<str>>,
-    body: impl AsyncRead + Send + 'static,
+    body: impl AsyncRead + Send,
     opts: MultipartOptions,
 ) -> Result<Request, ParseRequestError> {
     receive_batch_body(content_type, body, opts)
@@ -28,7 +28,7 @@ pub async fn receive_body(
 /// Receive a GraphQL request from a content type and body.
 pub async fn receive_batch_body(
     content_type: Option<impl AsRef<str>>,
-    body: impl AsyncRead + Send + 'static,
+    body: impl AsyncRead + Send,
     opts: MultipartOptions,
 ) -> Result<BatchRequest, ParseRequestError> {
     let content_type = content_type.as_ref().map(AsRef::as_ref);
